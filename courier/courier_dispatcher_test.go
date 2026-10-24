@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gofrs/uuid"
@@ -173,4 +174,93 @@ func TestDispatchMessageEmitsEventWithNID(t *testing.T) {
 	})
 	require.GreaterOrEqual(t, k, 0, "NID attribute not found on event")
 	assert.NotEmpty(t, attrs[k].Value.AsString())
+}
+
+func TestDispatchQueuePauseResume(t *testing.T) {
+	t.Parallel()
+
+	var deliveredRequests int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&deliveredRequests, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	requestConfig := fmt.Sprintf(`{"url": "%s", "method": "POST", "body": "file://./stub/request.config.mailer.jsonnet"}`, srv.URL)
+
+	_, reg := pkg.NewFastRegistryWithMocks(t, configx.WithValues(map[string]any{
+		config.ViperKeyCourierDeliveryStrategy:  "http",
+		config.ViperKeyCourierHTTPRequestConfig: requestConfig,
+	}))
+
+	worker, err := reg.Courier(t.Context())
+	require.NoError(t, err)
+	// A second courier, constructed after the pause, models a worker that
+	// restarted while the queue is paused.
+	restartedWorker, err := reg.Courier(t.Context())
+	require.NoError(t, err)
+
+	assertMessageState := func(id uuid.UUID, status courier.MessageStatus, sendCount int, dispatchCount int) courier.Message {
+		message, err := reg.CourierPersister().FetchMessage(t.Context(), id)
+		require.NoError(t, err)
+		assert.Equal(t, status, message.Status)
+		assert.Equal(t, sendCount, message.SendCount)
+		assert.Len(t, message.Dispatches, dispatchCount)
+		return *message
+	}
+
+	t.Run("case=workers skip dispatch while the queue is paused", func(t *testing.T) {
+		id := queueNewMessage(t, worker)
+
+		require.NoError(t, reg.CourierPersister().PauseQueue(t.Context()))
+		// Repeated pauses are idempotent.
+		require.NoError(t, reg.CourierPersister().PauseQueue(t.Context()))
+
+		// Neither the running worker nor a freshly started worker pull messages.
+		require.NoError(t, worker.DispatchQueue(t.Context()))
+		require.NoError(t, restartedWorker.DispatchQueue(t.Context()))
+
+		// The message is untouched: it stays queued, no retry is counted and no
+		// dispatch attempt is recorded.
+		assertMessageState(id, courier.MessageStatusQueued, 0, 0)
+		assert.Zero(t, atomic.LoadInt64(&deliveredRequests))
+
+		// New messages can still be enqueued while delivery is paused.
+		require.NotEqual(t, uuid.Nil, queueNewMessage(t, worker))
+		assertMessageState(id, courier.MessageStatusQueued, 0, 0)
+	})
+
+	t.Run("case=a batch fetched before the pause still completes", func(t *testing.T) {
+		// Claim the oldest of the two messages that accumulated while paused.
+		// This simulates a batch that was fetched just before the pause took
+		// effect.
+		claimed, err := reg.CourierPersister().NextMessages(t.Context(), 1)
+		require.NoError(t, err)
+		require.Len(t, claimed, 1)
+
+		require.NoError(t, reg.CourierPersister().PauseQueue(t.Context()))
+
+		// Delivery of a claimed message never consults the pause flag.
+		require.NoError(t, worker.DispatchMessage(t.Context(), claimed[0]))
+		assertMessageState(claimed[0].ID, courier.MessageStatusSent, 1, 0)
+	})
+
+	t.Run("case=processing resumes with the regular queue rules", func(t *testing.T) {
+		// The queue is still paused from the previous case; resume it.
+		require.NoError(t, reg.CourierPersister().ResumeQueue(t.Context()))
+		// Repeated resumes are idempotent.
+		require.NoError(t, reg.CourierPersister().ResumeQueue(t.Context()))
+
+		before := atomic.LoadInt64(&deliveredRequests)
+		require.NoError(t, worker.DispatchQueue(t.Context()))
+
+		// Two messages were enqueued during the first case. The oldest one was
+		// delivered as part of the pre-pause batch, so the remaining one is
+		// delivered now that the queue runs again.
+		assert.Equal(t, before+1, atomic.LoadInt64(&deliveredRequests))
+
+		// A subsequent poll finds an empty queue.
+		require.NoError(t, worker.DispatchQueue(t.Context()))
+		assert.Equal(t, before+1, atomic.LoadInt64(&deliveredRequests))
+	})
 }

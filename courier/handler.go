@@ -23,6 +23,9 @@ const (
 	AdminRouteCourier      = "/courier"
 	AdminRouteListMessages = AdminRouteCourier + "/messages"
 	AdminRouteGetMessage   = AdminRouteCourier + "/messages/{msgID}"
+	AdminRouteQueue        = AdminRouteCourier + "/queue"
+	AdminRoutePauseQueue   = AdminRouteCourier + "/queue/pause"
+	AdminRouteResumeQueue  = AdminRouteCourier + "/queue/resume"
 )
 
 type (
@@ -46,14 +49,24 @@ func NewHandler(r handlerDependencies) *Handler {
 }
 
 func (h *Handler) RegisterPublicRoutes(public *httprouterx.RouterPublic) {
-	h.r.CSRFHandler().IgnoreGlobs(httprouterx.AdminPrefix+AdminRouteListMessages, AdminRouteListMessages)
+	h.r.CSRFHandler().IgnoreGlobs(
+		httprouterx.AdminPrefix+AdminRouteListMessages, AdminRouteListMessages,
+		httprouterx.AdminPrefix+AdminRoutePauseQueue, AdminRoutePauseQueue,
+		httprouterx.AdminPrefix+AdminRouteResumeQueue, AdminRouteResumeQueue,
+	)
 	public.GET(httprouterx.AdminPrefix+AdminRouteListMessages, redir.RedirectToAdminRoute(h.r))
 	public.GET(httprouterx.AdminPrefix+AdminRouteGetMessage, redir.RedirectToAdminRoute(h.r))
+	public.GET(httprouterx.AdminPrefix+AdminRouteQueue, redir.RedirectToAdminRoute(h.r))
+	public.POST(httprouterx.AdminPrefix+AdminRoutePauseQueue, redir.RedirectToAdminRoute(h.r))
+	public.POST(httprouterx.AdminPrefix+AdminRouteResumeQueue, redir.RedirectToAdminRoute(h.r))
 }
 
 func (h *Handler) RegisterAdminRoutes(admin *httprouterx.RouterAdmin) {
 	admin.GET(AdminRouteListMessages, h.listCourierMessages)
 	admin.GET(AdminRouteGetMessage, h.getCourierMessage)
+	admin.GET(AdminRouteQueue, h.getCourierQueue)
+	admin.POST(AdminRoutePauseQueue, h.pauseCourierQueue)
+	admin.POST(AdminRouteResumeQueue, h.resumeCourierQueue)
 }
 
 // Paginated Courier Message List Response
@@ -216,4 +229,104 @@ func (h *Handler) getCourierMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.r.Writer().Write(w, r, message)
+}
+
+// swagger:route GET /admin/courier/queue courier getCourierQueue
+//
+// # Get Courier Queue Status
+//
+// Returns the delivery status of the courier queue for the current network.
+// The status is either `running` (default) or `paused`.
+//
+//	Produces:
+//	- application/json
+//
+//	Security:
+//	  oryAccessToken:
+//
+//	Schemes: http, https
+//
+//	Responses:
+//	  200: courierQueue
+//	  default: errorGeneric
+//
+//	Extensions:
+//	  x-ory-ratelimit-bucket: kratos-admin-low
+func (h *Handler) getCourierQueue(w http.ResponseWriter, r *http.Request) {
+	status, err := h.r.CourierPersister().GetQueueStatus(r.Context())
+	if err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	h.r.Writer().Write(w, r, Queue{Status: status})
+}
+
+// swagger:route POST /admin/courier/queue/pause courier pauseCourierQueue
+//
+// # Pause Courier Delivery
+//
+// Pauses delivery of queued courier messages for the current network.
+//
+// The queue and all queued messages are preserved and new messages can still
+// be enqueued, but workers stop fetching new messages. Messages of a batch
+// fetched before the pause are still delivered. Pausing does not count towards
+// message retries and does not mark any message as failed. Delivery continues
+// with the regular queue rules once it is resumed.
+//
+// This endpoint is idempotent: pausing an already paused queue is a no-op.
+//
+//	Produces:
+//	- application/json
+//
+//	Security:
+//	  oryAccessToken:
+//
+//	Schemes: http, https
+//
+//	Responses:
+//	  200: courierQueue
+//	  default: errorGeneric
+//
+//	Extensions:
+//	  x-ory-ratelimit-bucket: kratos-admin-low
+func (h *Handler) pauseCourierQueue(w http.ResponseWriter, r *http.Request) {
+	if err := h.r.CourierPersister().PauseQueue(r.Context()); err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	h.r.Writer().Write(w, r, Queue{Status: QueueStatusPaused})
+}
+
+// swagger:route POST /admin/courier/queue/resume courier resumeCourierQueue
+//
+// # Resume Courier Delivery
+//
+// Resumes delivery of queued courier messages for the current network.
+//
+// Workers resume fetching queued messages following the regular queue rules.
+// This endpoint is idempotent: resuming a running queue is a no-op.
+//
+//	Produces:
+//	- application/json
+//
+//	Security:
+//	  oryAccessToken:
+//
+//	Schemes: http, https
+//
+//	Responses:
+//	  200: courierQueue
+//	  default: errorGeneric
+//
+//	Extensions:
+//	  x-ory-ratelimit-bucket: kratos-admin-low
+func (h *Handler) resumeCourierQueue(w http.ResponseWriter, r *http.Request) {
+	if err := h.r.CourierPersister().ResumeQueue(r.Context()); err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	h.r.Writer().Write(w, r, Queue{Status: QueueStatusRunning})
 }

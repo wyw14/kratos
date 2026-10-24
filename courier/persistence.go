@@ -36,6 +36,25 @@ type (
 		// Records an attempt of sending out a courier message
 		// Returns an error if it fails
 		RecordDispatch(ctx context.Context, msgID uuid.UUID, status CourierMessageDispatchStatus, err error) error
+
+		// PauseQueue pauses courier delivery for the current network.
+		//
+		// The queue and all queued messages are preserved. Workers stop
+		// fetching new messages until the queue is resumed; messages already
+		// fetched are still dispatched. Pausing is idempotent and does not
+		// affect other networks.
+		PauseQueue(context.Context) error
+
+		// ResumeQueue resumes courier delivery for the current network.
+		//
+		// Workers resume fetching queued messages following the regular queue
+		// rules. Resuming is idempotent and does not affect other networks.
+		ResumeQueue(context.Context) error
+
+		// GetQueueStatus returns the delivery status of the current network's
+		// courier queue. It returns QueueStatusRunning when delivery has never
+		// been paused.
+		GetQueueStatus(context.Context) (QueueStatus, error)
 	}
 	PersistenceProvider interface {
 		CourierPersister() Persister

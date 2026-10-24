@@ -99,6 +99,22 @@ func (c *courier) DispatchMessage(ctx context.Context, msg Message) (err error) 
 func (c *courier) DispatchQueue(ctx context.Context) (err error) {
 	ctx, span := c.deps.Tracer(ctx).Tracer().Start(ctx, "courier.DispatchQueue")
 	defer otelx.End(span, &err)
+
+	// Every worker checks the persisted, per-network queue state before pulling
+	// new messages. While the queue is paused we return without touching any
+	// message: no batch is fetched, no retry counter is incremented and no
+	// failure is recorded. Batches fetched by another DispatchQueue call before
+	// the pause still run to completion because this check happens only once,
+	// before fetching the next batch.
+	queueStatus, err := c.deps.CourierPersister().GetQueueStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if queueStatus == QueueStatusPaused {
+		c.deps.Logger().Debug("Courier queue is paused, skipping message dispatch.")
+		return nil
+	}
+
 	maxRetries := c.deps.CourierConfig().CourierMessageRetries(ctx)
 	pullCount := c.deps.CourierConfig().CourierWorkerPullCount(ctx)
 

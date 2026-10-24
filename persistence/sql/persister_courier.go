@@ -200,6 +200,76 @@ func (p *Persister) FetchMessage(ctx context.Context, msgID uuid.UUID) (_ *couri
 	return &message, nil
 }
 
+func (p *Persister) PauseQueue(ctx context.Context) error {
+	return p.setQueueStatus(ctx, courier.QueueStatusPaused)
+}
+
+func (p *Persister) ResumeQueue(ctx context.Context) error {
+	return p.setQueueStatus(ctx, courier.QueueStatusRunning)
+}
+
+// setQueueStatus stores the queue status for the current network as an
+// idempotent upsert. Repeating the same status is a no-op that does not even
+// touch the row's timestamps, so pausing a paused queue (and resuming a running
+// queue) are fully idempotent.
+func (p *Persister) setQueueStatus(ctx context.Context, status courier.QueueStatus) (err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.setQueueStatus")
+	defer otelx.End(span, &err)
+
+	nid := p.NetworkID(ctx)
+	now := time.Now().UTC()
+	conn := p.GetConnection(ctx)
+
+	var stmt string
+	var args []interface{}
+	switch conn.Dialect.Name() {
+	case dbal.DriverMySQL:
+		stmt = `
+INSERT INTO courier_queues (nid, status, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  status = VALUES(status),
+  updated_at = IF(courier_queues.status = VALUES(status), courier_queues.updated_at, VALUES(updated_at))`
+		args = []interface{}{nid, status, now, now}
+	default:
+		// PostgreSQL, CockroachDB and SQLite all support the same
+		// INSERT ... ON CONFLICT (nid) DO UPDATE syntax.
+		stmt = `
+INSERT INTO courier_queues (nid, status, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (nid) DO UPDATE SET
+  status = EXCLUDED.status,
+  updated_at = CASE WHEN courier_queues.status = EXCLUDED.status
+                    THEN courier_queues.updated_at ELSE EXCLUDED.updated_at END`
+		args = []interface{}{nid, status, now, now}
+	}
+
+	if _, err := conn.RawQuery(stmt, args...).ExecWithCount(); err != nil {
+		return sqlcon.HandleError(err)
+	}
+
+	return nil
+}
+
+func (p *Persister) GetQueueStatus(ctx context.Context) (_ courier.QueueStatus, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.GetQueueStatus")
+	defer otelx.End(span, &err)
+
+	var q courier.Queue
+	switch err := p.GetConnection(ctx).RawQuery(
+		"SELECT nid, status, created_at, updated_at FROM courier_queues WHERE nid = ?",
+		p.NetworkID(ctx),
+	).First(&q); {
+	case err == nil:
+		return q.Status, nil
+	case errors.Is(err, sql.ErrNoRows):
+		// A network that has never been paused is running.
+		return courier.QueueStatusRunning, nil
+	default:
+		return 0, sqlcon.HandleError(err)
+	}
+}
+
 func (p *Persister) RecordDispatch(ctx context.Context, msgID uuid.UUID, status courier.CourierMessageDispatchStatus, err error) error {
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.RecordDispatch")
 	defer otelx.End(span, &err)

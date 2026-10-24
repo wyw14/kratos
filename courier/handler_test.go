@@ -282,4 +282,64 @@ func TestHandler(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("handler=courierQueue", func(t *testing.T) {
+		getQueue := func(t *testing.T, name string) gjson.Result {
+			t.Helper()
+			href := courier.AdminRouteQueue
+			ts := adminTS
+			if name == "public" {
+				href = httprouterx.AdminPrefix + href
+				ts = publicTS
+			}
+			parsed := get(t, ts, href, http.StatusOK)
+			require.Truef(t, parsed.IsObject(), "%s", parsed.Raw)
+			return parsed.Get("status")
+		}
+
+		post := func(t *testing.T, name, href string) gjson.Result {
+			t.Helper()
+			ts := adminTS
+			if name == "public" {
+				href = httprouterx.AdminPrefix + href
+				ts = publicTS
+			}
+
+			res, err := ts.Client().Post(ts.URL+href, "", nil)
+			require.NoError(t, err)
+			body, err := io.ReadAll(res.Body)
+			require.NoError(t, err)
+			require.NoError(t, res.Body.Close())
+			require.EqualValuesf(t, http.StatusOK, res.StatusCode, "%s", body)
+			parsed := gjson.ParseBytes(body)
+			require.Truef(t, parsed.IsObject(), "%s", body)
+			return parsed.Get("status")
+		}
+
+		// The queue runs per network by default and is reachable through both
+		// the admin endpoint and the public endpoint (which redirects).
+		for _, name := range []string{"admin", "public"} {
+			t.Run("endpoint="+name, func(t *testing.T) {
+				assert.Equal(t, "running", getQueue(t, name).String())
+			})
+		}
+
+		// Pausing persists the state for every observer and is idempotent.
+		assert.Equal(t, "paused", post(t, "admin", courier.AdminRoutePauseQueue).String())
+		status, err := reg.CourierPersister().GetQueueStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, courier.QueueStatusPaused, status)
+		assert.Equal(t, "paused", getQueue(t, "admin").String())
+		assert.Equal(t, "paused", getQueue(t, "public").String())
+		assert.Equal(t, "paused", post(t, "admin", courier.AdminRoutePauseQueue).String())
+		assert.Equal(t, "paused", post(t, "public", courier.AdminRoutePauseQueue).String())
+
+		// Resuming persists the state and is idempotent.
+		assert.Equal(t, "running", post(t, "public", courier.AdminRouteResumeQueue).String())
+		status, err = reg.CourierPersister().GetQueueStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, courier.QueueStatusRunning, status)
+		assert.Equal(t, "running", getQueue(t, "admin").String())
+		assert.Equal(t, "running", post(t, "admin", courier.AdminRouteResumeQueue).String())
+	})
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/ory/kratos/courier"
+	"github.com/ory/kratos/persistence"
 	"github.com/ory/kratos/x"
 	"github.com/ory/pop/v6"
 	keysetpagination "github.com/ory/x/pagination/keysetpagination_v2"
@@ -367,6 +368,83 @@ func TestPersister(ctx context.Context, newNetworkUnlessExisting NetworkWrapper,
 
 				_, err := p.FetchMessage(ctx, msgID)
 				require.ErrorIs(t, err, sqlcon.ErrNoRows())
+			})
+		})
+
+		t.Run("case=queue pause and resume", func(t *testing.T) {
+			// A network that never interacted with the queue is running.
+			status, err := p.GetQueueStatus(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, courier.QueueStatusRunning, status)
+
+			// Pausing persists and can be read back.
+			require.NoError(t, p.PauseQueue(ctx))
+			status, err = p.GetQueueStatus(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, courier.QueueStatusPaused, status)
+
+			// Pausing an already paused queue is idempotent.
+			require.NoError(t, p.PauseQueue(ctx))
+			status, err = p.GetQueueStatus(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, courier.QueueStatusPaused, status)
+
+			// Messages can still be enqueued while delivery is paused.
+			enqueuedWhilePaused := courier.Message{}
+			require.NoError(t, faker.FakeData(&enqueuedWhilePaused))
+			require.NoError(t, p.AddMessage(ctx, &enqueuedWhilePaused))
+			backdateMessage(t, enqueuedWhilePaused.ID)
+			latest, err := p.LatestQueuedMessage(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, enqueuedWhilePaused.ID, latest.ID)
+
+			// Resuming persists, and resuming a running queue is idempotent.
+			require.NoError(t, p.ResumeQueue(ctx))
+			status, err = p.GetQueueStatus(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, courier.QueueStatusRunning, status)
+			require.NoError(t, p.ResumeQueue(ctx))
+			status, err = p.GetQueueStatus(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, courier.QueueStatusRunning, status)
+
+			t.Run("is scoped to the network", func(t *testing.T) {
+				_, other := newNetwork(t, ctx)
+
+				// Pausing one network leaves the other one running.
+				require.NoError(t, p.PauseQueue(ctx))
+				otherStatus, err := other.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusRunning, otherStatus)
+
+				// Pausing the other network does not change the first one.
+				require.NoError(t, other.PauseQueue(ctx))
+				otherStatus, err = other.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusPaused, otherStatus)
+				status, err := p.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusPaused, status)
+
+				// Resuming one network leaves the other one paused.
+				require.NoError(t, p.ResumeQueue(ctx))
+				status, err = p.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusRunning, status)
+				otherStatus, err = other.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusPaused, otherStatus)
+			})
+
+			t.Run("survives a fresh persister", func(t *testing.T) {
+				// A fresh persister instance (e.g. a restarted worker) reads
+				// the same persisted state for the network.
+				networked, ok := p.(persistence.Networker)
+				require.True(t, ok, "test persister does not support WithNetworkID")
+				fresh := networked.WithNetworkID(p.NetworkID(ctx))
+				status, err := fresh.GetQueueStatus(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, courier.QueueStatusRunning, status)
 			})
 		})
 	}
