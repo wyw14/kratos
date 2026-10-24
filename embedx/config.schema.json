@@ -2276,6 +2276,12 @@
           "description": "You can override certain or all message templates by pointing this key to the path where the templates are located.",
           "examples": ["/conf/courier-templates"]
         },
+        "template_default_locale": {
+          "type": "string",
+          "title": "Default message template locale",
+          "description": "The locale (e.g. en_US) used to render localized message templates when no locale is explicitly supplied. It is also used as a fallback before the unlocalized default template is rendered. Leave empty to disable localized template loading.",
+          "examples": ["en_US"]
+        },
         "message_retries": {
           "description": "Defines the maximum number of times the sending of a message is retried after it failed before it is marked as abandoned",
           "type": "integer",

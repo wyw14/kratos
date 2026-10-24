@@ -36,6 +36,7 @@ type (
 		QueueSMS(ctx context.Context, t SMSTemplate) (uuid.UUID, error)
 		DispatchQueue(ctx context.Context) error
 		DispatchMessage(ctx context.Context, msg Message) error
+		PreviewMessageDispatch(ctx context.Context, req PreviewMessageDispatchRequest) (*PreviewMessageDispatch, error)
 		UseBackoff(b backoff.BackOff)
 		FailOnDispatchError()
 	}

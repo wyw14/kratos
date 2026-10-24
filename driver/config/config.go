@@ -57,6 +57,7 @@ const (
 	ViperKeyCourierSMTPClientCertPath                        = "courier.smtp.client_cert_path"
 	ViperKeyCourierSMTPClientKeyPath                         = "courier.smtp.client_key_path"
 	ViperKeyCourierTemplatesPath                             = "courier.template_override_path"
+	ViperKeyCourierTemplateDefaultLocale                     = "courier.template_default_locale"
 	ViperKeyCourierTemplatesRecoveryInvalidEmail             = "courier.templates.recovery.invalid.email"
 	ViperKeyCourierTemplatesRecoveryValidEmail               = "courier.templates.recovery.valid.email"
 	ViperKeyCourierTemplatesRecoveryCodeInvalidEmail         = "courier.templates.recovery_code.invalid.email"
@@ -317,6 +318,7 @@ type (
 	}
 	CourierConfigs interface {
 		CourierTemplatesRoot(ctx context.Context) string
+		CourierTemplateDefaultLocale(ctx context.Context) string
 		CourierTemplatesVerificationInvalid(ctx context.Context) *CourierEmailTemplate
 		CourierTemplatesVerificationValid(ctx context.Context) *CourierEmailTemplate
 		CourierTemplatesRecoveryInvalid(ctx context.Context) *CourierEmailTemplate
@@ -1121,6 +1123,14 @@ func (p *Config) CourierEmailRequestConfig(ctx context.Context) json.RawMessage 
 
 func (p *Config) CourierTemplatesRoot(ctx context.Context) string {
 	return p.GetProvider(ctx).StringF(ViperKeyCourierTemplatesPath, "courier/builtin/templates")
+}
+
+// CourierTemplateDefaultLocale returns the locale (e.g. "en_US") used to
+// render localized courier templates when no locale is explicitly supplied,
+// and which acts as a fallback before the unlocalized default template is
+// rendered. An empty string disables localized template loading.
+func (p *Config) CourierTemplateDefaultLocale(ctx context.Context) string {
+	return strings.TrimSpace(p.GetProvider(ctx).StringF(ViperKeyCourierTemplateDefaultLocale, ""))
 }
 
 func (p *Config) CourierEmailTemplatesHelper(ctx context.Context, key string) *CourierEmailTemplate {
